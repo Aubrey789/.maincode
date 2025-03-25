@@ -1,0 +1,206 @@
+import serial
+import time
+from field_simulation import CompetitionField
+from thermal_camera import mlx
+from tof_module import get_tof_distances, FRONT_MIDDLE_SENSORS, FRONT_SIDE_SENSORS, BACK_MID>
+from ultrasonic_module import get_ultrasonic_distances  # Wrapper for GPIO 20/21
+import pigpio
+import RPi.GPIO as GPIO
+
+SWITCH_PIN = 26  # GPIO 26 (pin 37)
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(SWITCH_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+FRONT_SIDE_SENSORS = [0, 3]
+FRONT_MIDDLE_SENSORS = [1, 2]
+BACK_SIDE_SENSORS = [4, 7]
+BACK_MIDDLE_SENSORS = [5, 6]
+
+def wait_for_switch():
+    print("[WAITING] Flip the switch to start...")
+    while GPIO.input(SWITCH_PIN) == 1:
+        time.sleep(0.1)
+    print("[START] Switch is ON. Beginning mission.")
+
+# Serial to Arduino
+arduino = serial.Serial("/dev/ttyACM0", 115200, timeout=1)
+time.sleep(2)
+arduino.reset_input_buffer()
+
+# Simulation field
+field = CompetitionField()
+start_pos = field.getMyRobot().getCurrentLocation()
+
+def get_heat_source():
+    frame = [0] * 768
+    mlx.getFrame(frame)
+    max_temp = max(frame)
+    max_index = frame.index(max_temp)
+    row = max_index // 32
+    col = max_index % 32
+    print(f"[THERMAL] Max Temp: {max_temp:.2f}°C at Row {row}, Col {col}")
+    return max_temp, row, col
+
+def send_command(cmd):
+    print(f"[COMMAND] → Arduino: {cmd}")
+    arduino.write((cmd + "\n").encode())
+
+def wait_for_done():
+    while True:
+        if arduino.in_waiting:
+            msg = arduino.readline().decode().strip()
+            if msg == "DONE":
+                print("[✓] Arduino completed action")
+   break
+
+def get_ultrasonic_inches():
+    # Replace with your actual sensor read functions
+    # Example return:
+    return 19.2, 34.0  # left_in_inches, right_in_inches
+
+def is_obstacle_near():
+    tof = get_tof_distances()
+    us = get_ultrasonic_distances()
+
+    print(f"[ToF] FL: {tof['front_left']} | FR: {tof['front_right']}")
+    print(f"[US]  L: {us['left']:.1f} in | R: {us['right']:.1f} in")
+
+    if (
+        tof["front_left"] < 150 or
+        tof["front_right"] < 150 or
+        us["left"] < 6 or
+        us["right"] < 6
+    ):
+        print("[⚠️] Obstacle Detected")
+        return True
+    return False
+
+def find_new_path():
+    print("[NAVIGATION] Avoiding Obstacle...")
+    send_command("TURN LEFT")
+    wait_for_done()
+    us_left = get_ultrasonic_distances()["left"]
+    time.sleep(0.2)
+
+    send_command("TURN RIGHT")
+    wait_for_done()
+    us_right = get_ultrasonic_distances()["right"]
+    time.sleep(0.2)
+
+    if us_left > us_right:
+        return "TURN LEFT"
+    else:
+        return "TURN RIGHT"
+
+def navigate_to_fire_and_back():
+    print("[MISSION] Searching for fire...")
+ # Setup field and robot
+    field = CompetitionField()
+    robot = field.getMyRobot()
+
+    # 🔥 1. Lock onto hottest fire zone
+    fire_locked = False
+    target_area = None
+    fire_index = None
+
+    while not fire_locked:
+        max_temp, row, col = get_heat_source()
+        if max_temp >= 30:
+            fire_index = 0 if col < 10 else 1 if col < 22 else 2 if col < 30 else 3
+            target_area = field.getPotentialTargetAreas()[fire_index]
+            fire_locked = True
+            print(f"[🔥 LOCKED] Fire zone {fire_index} at col {col} | Temp: {max_temp:.2f}°C>
+        else:
+            print("[WAIT] No valid fire yet...")
+        time.sleep(1)
+
+    # 🔁 2. Move toward fire, reactively avoiding obstacles
+    while not target_area.checkIfInside(robot.getCurrentLocation()):
+        fire_center = target_area.getCenterPoint()
+
+        angle = field.getAngleTo(fire_center)
+        distance = field.getDistanceTo(fire_center)
+        print(f"[NAV] Aiming at zone {fire_index} → angle {angle:.1f}°, distance {distance:.>
+
+        # 🔄 Rotate toward fire
+        arduino.write(f"ROTATE:{angle}\n".encode())
+        wait_for_done()
+
+        # 📡 Sensor Check (Front only)
+        tof = get_tof_distances()
+        us_l, us_r = get_ultrasonic_inches()
+
+        front_vals = [tof[i] for i in FRONT_MIDDLE_SENSORS + FRONT_SIDE_SENSORS]
+        front_blocked = any(d < 100 for d in front_vals if d > 0) or us_l < 6 or us_r < 6
+
+        print(f"[ToF FRONT] {[tof[i] for i in FRONT_SIDE_SENSORS + FRONT_MIDDLE_SENSORS]}")
+        print(f"[US FRONT] L: {us_l:.1f} in | R: {us_r:.1f} in")
+
+        if front_blocked:
+            print("[⚠️] Obstacle detected — backing up + rerouting")
+            arduino.write(b"ROTATE:180\n")
+            wait_for_done()
+ # Back sensor check (only when backing up)
+            back_vals = [tof[i] for i in BACK_MIDDLE_SENSORS + BACK_SIDE_SENSORS]
+            back_clear = all(d > 150 for d in back_vals if d > 0)
+
+            if back_clear:
+                arduino.write(b"MOVE:6\n")
+                wait_for_done()
+                field.moveForwards(-6)
+            else:
+                print("[‼️] Rear blocked too — trying to spin away")
+                arduino.write(b"ROTATE:45\n")
+                wait_for_done()
+
+            continue  # retry targeting after reroute
+
+        # ✅ Safe to move forward
+        arduino.write(b"MOVE:6\n")
+        wait_for_done()
+
+        # Double-check sensors again AFTER move to verify it was successful
+        tof_post = get_tof_distances()
+        us_l_post, us_r_post = get_ultrasonic_inches()
+        front_vals_post = [tof_post[i] for i in FRONT_MIDDLE_SENSORS + FRONT_SIDE_SENSORS]
+        front_blocked_after = any(d < 100 for d in front_vals_post if d > 0) or us_l_post < >
+
+        if not front_blocked_after:
+            field.moveForwards(6)
+            pos = robot.getCurrentLocation()
+            print(f"[DEBUG] Robot thinks it's at ({pos.getX():.1f}, {pos.getY():.1f}) facing>
+            print(f"[POS] New location: ({pos.getX():.1f}, {pos.getY():.1f})")
+        else:
+            print("[SKIP] Move blocked — not updating position")
+
+
+    print("🔥 Reached target fire zone!")
+
+    # 🔙 3. Return to starting position
+    start = robot.getStartingLocation()
+    angle_back = field.getAngleTo(start)
+    distance_back = field.getDistanceTo(start)
+
+    print(f"[RETURN] Rotating to {angle_back:.1f}°, distance {distance_back:.1f} in")
+
+    arduino.write(f"ROTATE:{angle_back}\n".encode())
+    wait_for_done()
+
+    steps_back = int(distance_back // 6)
+    for _ in range(steps_back):
+        arduino.write(b"MOVE:6\n")
+        wait_for_done()
+        field.moveForwards(6)
+
+    print("🔥 Mission Complete!")
+if __name__ == "__main__":
+    try:
+        while True:
+            wait_for_switch()
+            navigate_to_fire_and_back()
+            print("[DONE] Waiting for switch to go LOW before next run...\n")
+            while GPIO.input(SWITCH_PIN) == 0:
+                time.sleep(0.1)
+    except KeyboardInterrupt:
+        GPIO.cleanup()
+        print("\n[EXIT] Program terminated.")
