@@ -1,0 +1,60 @@
+# tof_module.py
+# VL53L0X - 8 sensor setup with unique I2C addresses and XSHUT pin initialization
+
+import time
+import board
+import busio
+import digitalio
+import adafruit_vl53l0x
+
+# I2C addresses of sensors
+SENSOR_ADDRESSES = [0x30, 0x31, 0x32, 0x34, 0x35, 0x36, 0x37, 0x38]
+
+# Sensor groups (used elsewhere in main)
+FRONT_SIDE_SENSORS = [0, 3]
+FRONT_MIDDLE_SENSORS = [1, 2]
+BACK_SIDE_SENSORS = [4, 7]
+BACK_MIDDLE_SENSORS = [5, 6]
+
+# GPIO XSHUT pins corresponding to sensors
+xshut_pins = [17, 27, 22, 23, 24, 25, 5, 6]
+
+# Initialize I2C
+i2c = busio.I2C(board.SCL, board.SDA)
+
+# Power down all sensors
+gpios = []
+for pin in xshut_pins:
+    gpio = digitalio.DigitalInOut(digitalio.Pin(pin))
+    gpio.direction = digitalio.Direction.OUTPUT
+    gpio.value = False
+    gpios.append(gpio)
+time.sleep(0.5)
+
+# Power up each sensor one at a time and assign address
+sensors = []
+for i, gpio in enumerate(gpios):
+    print(f"[INIT] Powering Sensor {i+1}")
+    gpio.value = True
+    time.sleep(0.2)
+    try:
+        sensor = adafruit_vl53l0x.VL53L0X(i2c)
+        sensor.set_address(SENSOR_ADDRESSES[i])
+        time.sleep(0.1)
+        sensor = adafruit_vl53l0x.VL53L0X(i2c, address=SENSOR_ADDRESSES[i])
+        sensors.append(sensor)
+        print(f"[SUCCESS] Sensor {i+1} at 0x{SENSOR_ADDRESSES[i]:X}")
+    except Exception as e:
+        print(f"[ERROR] Sensor {i+1}: {e}")
+        sensors.append(None)
+
+# Read distances from all 8 sensors (indexed 0 to 7)
+def get_tof_distances():
+    distances = {}
+    for i, sensor in enumerate(sensors):
+        try:
+            distances[i] = sensor.range if sensor else 0
+        except Exception as e:
+            print(f"[ToF ERROR] Sensor {i}: {e}")
+            distances[i] = 0
+    return distances
