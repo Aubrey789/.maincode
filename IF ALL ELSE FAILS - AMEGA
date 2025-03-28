@@ -1,0 +1,123 @@
+#include <Arduino.h>
+
+// === Motor Pins ===
+#define M1INA 22
+#define M1INB 24
+#define M1EN  26
+#define M1PWM 4
+
+#define M2INA 28
+#define M2INB 30
+#define M2EN  32
+#define M2PWM 5
+
+// === Encoder Pins ===
+#define ENC_FL_A 2
+#define ENC_FR_A 3
+
+// === Motion Constants ===
+const float WHEEL_DIAMETER = 4.0;  // inches
+const float INCHES_PER_TICK = 0.0025;  // calibrated
+const float ROTATE_MS_PER_DEGREE = 10.0; // adjust this if needed
+
+// === Encoder Tracking ===
+volatile long encoderFL = 0, encoderFR = 0;
+bool moving = false;
+long targetTicks = 0;
+
+// === Encoder ISRs ===
+void encFL_ISR() { encoderFL++; }
+void encFR_ISR() { encoderFR++; }
+
+void setup() {
+  Serial.begin(115200);
+
+  // Motor Pins
+  pinMode(M1INA, OUTPUT); pinMode(M1INB, OUTPUT);
+  pinMode(M1EN, OUTPUT); pinMode(M1PWM, OUTPUT);
+
+  pinMode(M2INA, OUTPUT); pinMode(M2INB, OUTPUT);
+  pinMode(M2EN, OUTPUT); pinMode(M2PWM, OUTPUT);
+
+  // Encoder Pins
+  pinMode(ENC_FL_A, INPUT_PULLUP);
+  pinMode(ENC_FR_A, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(ENC_FL_A), encFL_ISR, FALLING);
+  attachInterrupt(digitalPinToInterrupt(ENC_FR_A), encFR_ISR, FALLING);
+
+  stopMotors();
+  Serial.println("[ARDUINO] Ready");
+}
+
+void loop() {
+  // Handle serial command
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    processCommand(cmd);
+  }
+
+  // Encoder-based move complete check
+  if (moving) {
+    long avgTicks = (encoderFL + encoderFR) / 2;
+    if (avgTicks >= targetTicks) {
+      stopMotors();
+      moving = false;
+      Serial.println("DONE");
+    }
+  }
+}
+
+void processCommand(String cmd) {
+  if (cmd.startsWith("MOVE:")) {
+    float inches = cmd.substring(5).toFloat();
+    moveLinear(inches);
+  } else if (cmd.startsWith("ROTATE:")) {
+    float degrees = cmd.substring(7).toFloat();
+    rotate(degrees);
+  } else if (cmd == "STOP") {
+    stopMotors();
+    Serial.println("DONE");
+  }
+}
+
+void moveLinear(float inches) {
+  encoderFL = 0; encoderFR = 0;
+  targetTicks = abs(inches) / INCHES_PER_TICK;
+  moving = true;
+
+  if (inches > 0) {
+    digitalWrite(M1INA, LOW); digitalWrite(M1INB, HIGH);
+    digitalWrite(M2INA, LOW); digitalWrite(M2INB, HIGH);
+  } else {
+    digitalWrite(M1INA, HIGH); digitalWrite(M1INB, LOW);
+    digitalWrite(M2INA, HIGH); digitalWrite(M2INB, LOW);
+  }
+
+  digitalWrite(M1EN, HIGH); digitalWrite(M2EN, HIGH);
+  analogWrite(M1PWM, 30); analogWrite(M2PWM, 30);
+}
+
+void rotate(float degrees) {
+  unsigned long duration = abs(degrees) * ROTATE_MS_PER_DEGREE;
+
+  if (degrees > 0) {
+    digitalWrite(M1INA, LOW); digitalWrite(M1INB, HIGH);
+    digitalWrite(M2INA, HIGH); digitalWrite(M2INB, LOW);
+  } else {
+    digitalWrite(M1INA, HIGH); digitalWrite(M1INB, LOW);
+    digitalWrite(M2INA, LOW); digitalWrite(M2INB, HIGH);
+  }
+
+  digitalWrite(M1EN, HIGH); digitalWrite(M2EN, HIGH);
+  analogWrite(M1PWM, 70); analogWrite(M2PWM, 70);
+  delay(duration);
+  stopMotors();
+  Serial.println("DONE");
+}
+
+void stopMotors() {
+  digitalWrite(M1EN, LOW); digitalWrite(M2EN, LOW);
+  analogWrite(M1PWM, 0); analogWrite(M2PWM, 0);
+  moving = false;
+}
