@@ -1,0 +1,38 @@
+# ultrasonic_module.py
+# Reads ultrasonic pulse width on GPIO 20 (left) and 21 (right)
+
+import pigpio
+import time
+
+TRIG_LEFT = 20
+TRIG_RIGHT = 21
+
+pi = pigpio.pi()
+
+if not pi.connected:
+    raise RuntimeError("pigpio daemon not running. Please run 'sudo pigpiod'")
+
+def read_distance(gpio_pin):
+    pi.set_mode(gpio_pin, pigpio.INPUT)
+    timeout = time.time() + 0.05
+
+    while pi.read(gpio_pin) == 0:
+        if time.time() > timeout:
+            return 999
+    start = time.time()
+
+    while pi.read(gpio_pin) == 1:
+        if time.time() > timeout:
+            return 999
+    end = time.time()
+
+    pulse_width = end - start
+    return pulse_width * 13503.9  # inches
+
+def get_ultrasonic_distances():
+    return {
+        "left": read_distance(TRIG_LEFT),
+        "right": read_distance(TRIG_RIGHT)
+    }
+
+
