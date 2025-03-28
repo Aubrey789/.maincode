@@ -1,0 +1,158 @@
+ Arduino Code:
+// ====== PIN SETUP ======
+#define M1EN 23
+#define M1NA 22
+#define M1NB 24
+#define M1PWM 4
+
+#define M2EN 32
+#define M2NA 30
+#define M2NB 28
+#define M2PWM 5
+
+#define M3EN 31
+#define M3NA 33
+#define M3NB 29
+#define M3PWM 6
+
+#define M4EN 25
+#define M4NA 26
+#define M4NB 27
+#define M4PWM 7
+
+#define FL_A 21
+#define FR_A 20
+#define BL_A 2
+#define BR_A 3
+
+volatile long encFL = 0, encFR = 0, encBL = 0, encBR = 0;
+long targetFL = 0, targetFR = 0, targetBL = 0, targetBR = 0;
+bool returnToFire = false;
+const int threshold = 10;
+
+void setup() {
+  Serial.begin(9600);
+
+  pinMode(M1EN, OUTPUT); pinMode(M1NA, OUTPUT); pinMode(M1NB, OUTPUT); pinMode(M1PWM, OUTPUT);
+  pinMode(M2EN, OUTPUT); pinMode(M2NA, OUTPUT); pinMode(M2NB, OUTPUT); pinMode(M2PWM, OUTPUT);
+  pinMode(M3EN, OUTPUT); pinMode(M3NA, OUTPUT); pinMode(M3NB, OUTPUT); pinMode(M3PWM, OUTPUT);
+  pinMode(M4EN, OUTPUT); pinMode(M4NA, OUTPUT); pinMode(M4NB, OUTPUT); pinMode(M4PWM, OUTPUT);
+
+  attachInterrupt(digitalPinToInterrupt(FL_A), [](){ encFL++; }, RISING);
+  attachInterrupt(digitalPinToInterrupt(FR_A), [](){ encFR++; }, RISING);
+  attachInterrupt(digitalPinToInterrupt(BL_A), [](){ encBL++; }, RISING);
+  attachInterrupt(digitalPinToInterrupt(BR_A), [](){ encBR++; }, RISING);
+}
+
+void loop() {
+  if (returnToFire) {
+    returnToFireMovement();
+  }
+}
+
+// ====== Motor Control ======
+void setMotor(int en, int na, int nb, int pwm, int speed) {
+  digitalWrite(en, HIGH);
+  digitalWrite(na, speed > 0);
+  digitalWrite(nb, speed < 0);
+  analogWrite(pwm, abs(speed));
+}
+
+void setMotorFL(int speed) { setMotor(M3EN, M3NA, M3NB, M3PWM, speed); }
+void setMotorFR(int speed) { setMotor(M2EN, M2NA, M2NB, M2PWM, speed); }
+void setMotorBL(int speed) { setMotor(M4EN, M4NA, M4NB, M4PWM, speed); }
+void setMotorBR(int speed) { setMotor(M1EN, M1NA, M1NB, M1PWM, speed); }
+
+void stopAllMotors() {
+  setMotorFL(0); setMotorFR(0); setMotorBL(0); setMotorBR(0);
+}
+
+// ====== Return to Fire Movement ======
+void returnToFireMovement() {
+  bool FLdone = abs(encFL - targetFL) < threshold;
+  bool FRdone = abs(encFR - targetFR) < threshold;
+  bool BLdone = abs(encBL - targetBL) < threshold;
+  bool BRdone = abs(encBR - targetBR) < threshold;
+
+  if (FLdone && FRdone && BLdone && BRdone) {
+    stopAllMotors();
+    returnToFire = false;
+    Serial.println("🔥 Reached fire location!");
+    return;
+  }
+
+  setMotorFL(FLdone ? 0 : (encFL > targetFL ? -40 : 40));
+  setMotorFR(FRdone ? 0 : (encFR > targetFR ? -40 : 40));
+  setMotorBL(BLdone ? 0 : (encBL > targetBL ? -40 : 40));
+  setMotorBR(BRdone ? 0 : (encBR > targetBR ? -40 : 40));
+}
+
+// ====== Serial Commands ======
+void serialEvent() {
+  while (Serial.available()) {
+    String line = Serial.readStringUntil('\n');
+    line.trim();
+
+    if (line.startsWith("CMD:FIRE")) {
+      // Reset target vars
+      targetFL = targetFR = targetBL = targetBR = 0;
+    } else if (line.startsWith("FL:")) {
+      targetFL = line.substring(3).toInt();
+    } else if (line.startsWith("FR:")) {
+      targetFR = line.substring(3).toInt();
+    } else if (line.startsWith("BL:")) {
+      targetBL = line.substring(3).toInt();
+    } else if (line.startsWith("BR:")) {
+      targetBR = line.substring(3).toInt();
+    } else if (line.startsWith("CMD:GO")) {
+      returnToFire = true;
+    } else if (line.startsWith("CMD:ENCODERS")) {
+      Serial.print("FL:"); Serial.println(encFL);
+      Serial.print("FR:"); Serial.println(encFR);
+      Serial.print("BL:"); Serial.println(encBL);
+      Serial.print("BR:"); Serial.println(encBR);
+    }
+  }
+}
+Pi Code:
+import serial
+import time
+
+# Open serial port to Arduino
+ser = serial.Serial("/dev/ttyUSB0", 9600)  # Update port as needed
+time.sleep(2)  # Let Arduino settle
+
+def get_encoder_counts():
+    ser.write(b"CMD:ENCODERS\n")
+    fire_encoders = {}
+
+    while len(fire_encoders) < 4:
+        line = ser.readline().decode().strip()
+        if ':' in line:
+            motor, count = line.split(':')
+            fire_encoders[motor] = int(count)
+
+    return fire_encoders
+
+def send_fire_encoders(encoders):
+    ser.write(b"CMD:FIRE\n")
+    time.sleep(0.05)
+    for motor, count in encoders.items():
+        ser.write(f"{motor}:{count}\n".encode())
+        time.sleep(0.05)
+
+def trigger_return_to_fire():
+    ser.write(b"CMD:GO\n")
+
+# 🔥 Fire detected — save encoder location
+fire_encoders = get_encoder_counts()
+print("🔥 Fire detected at encoder counts:", fire_encoders)
+
+# Send them to Arduino
+send_fire_encoders(fire_encoders)
+
+# Wait for round 2...
+input("Press ENTER when it's time to return to fire position.")
+
+# Start return
+trigger_return_to_fire()
