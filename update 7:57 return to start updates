@@ -10,6 +10,7 @@ import busio
 import digitalio
 import adafruit_vl53l0x
 import numpy as np
+import math
 
 # === SENSOR LAYOUT (Index → Physical Position) ===
 #  0 → Front Left
@@ -78,8 +79,8 @@ def init_tof_sensors():
             print(f"[ERROR] Sensor {i+1}: {e}")
             tof_sensors.append(None)
 
-def thermal_acquire_target(scan_step=20, max_rotation=360, threshold=40):
-    print("[SEEK] Beginning 360° fire scan...")
+def thermal_acquire_target(scan_step=60, max_rotation=360, threshold=40):
+    print("[SEEK] Performing 360° fire scan (every 60°)...")
 
     hottest_temp = -999
     best_angle = 0
@@ -97,7 +98,7 @@ def thermal_acquire_target(scan_step=20, max_rotation=360, threshold=40):
 
         if current_max >= threshold:
             print(f"[LOCK] Fire target found at {total_rotated}° → {current_max:.2f}°C")
-            return total_rotated  # Early exit
+            return total_rotated
 
         send_command(f"ROTATE:{scan_step}")
         wait_for_done()
@@ -169,12 +170,12 @@ def is_back_clear(threshold_mm=75):
     return all(d > threshold_mm for d in distances)
 
 def perform_thermal_scan():
-    print("[SCAN] Starting thermal sweep...")
+    print("[SCAN] Starting initial 80° thermal sweep...")
     max_temp = -999
     best_angle = 0
     current_angle = 0
 
-    for step in [20, 20, 20, 20]:  # 4 steps: 20°, 40°, 60°, 80° total
+    for step in [20, 20, 20, 20]:  # Total: 80°
         angle = step if SCAN_DIRECTION == "RIGHT" else -step
         current_angle += angle
         send_command(f"ROTATE:{angle}")
@@ -192,7 +193,6 @@ def perform_thermal_scan():
 
     print(f"[LOCKED] Hottest angle: {best_angle}° @ {max_temp:.2f}°C")
     return best_angle
-
 
 def is_obstacle():
     tof = get_tof_distances()
@@ -296,19 +296,20 @@ def navigate_to_fire(initial_angle):
     fire_found = False
     fire_confirmed = False
 
-   while True:
-    # Do 360° fire seek if no confirmed fire yet
-    if not fire_found:
-        seek_angle = thermal_acquire_target()
-        send_command(f"ROTATE:{seek_angle}")
-        wait_for_done()
-    else:
-        rotate_toward_hottest_pixel()
+    while True:
+        # 🔥 First: scan to acquire fire heading
+        if not fire_found:
+            seek_angle = thermal_acquire_target()
+            send_command(f"ROTATE:{seek_angle}")
+            wait_for_done()
+        else:
+            rotate_toward_hottest_pixel()
 
+        # 🚶 Then move forward and accumulate distance
         moved = safe_move_forward(2.0)
         total_distance += moved
 
-
+        # 📸 Scan thermal frame during movement window
         start_time = time.time()
         while time.time() - start_time < 3.0:
             frame = [0] * 768
@@ -337,26 +338,44 @@ def navigate_to_fire(initial_angle):
 
     return total_distance
 
+
+def angle_to_target(from_pos, to_pos):
+    dx = to_pos.x - from_pos.x
+    dy = to_pos.y - from_pos.y
+    angle_rad = math.atan2(dy, dx)
+    angle_deg = math.degrees(angle_rad)
+    return angle_deg % 360
+
 def return_to_start(total_distance, max_corrections=3, error_threshold=6):
     global current_heading
     print(f"[RETURN] Heading back to start. Distance: {total_distance:.2f} in")
 
     correction_attempts = 0
+    retry_step_size = 0.5
 
     while correction_attempts <= max_corrections:
-        # Rotate toward starting direction
-        return_angle = (180 - current_heading) % 360
-        if return_angle > 180:
-            return_angle -= 360
+        final_pos = robot.getCurrentLocation()
+        dx = final_pos.x - start_pos.x
+        dy = final_pos.y - start_pos.y
+        error = (dx**2 + dy**2)**0.5
 
-        print(f"[RETURN] Rotating {return_angle:.2f}° to face start")
-        send_command(f"ROTATE:{return_angle}")
+        # Compute angle from current location to starting point
+        angle_home = angle_to_target(final_pos, start_pos)
+        angle_to_rotate = (angle_home - current_heading) % 360
+        if angle_to_rotate > 180:
+            angle_to_rotate -= 360
+
+        print(f"[REORIENT] Rotating {angle_to_rotate:.2f}° to face start")
+        send_command(f"ROTATE:{angle_to_rotate}")
         wait_for_done()
+        current_heading = angle_home  # Update heading to true
 
-        # Begin safe return movement
+        # Limit retry travel to avoid overshoot
+        retry_distance = min(error, 10)
+        print(f"[RETURN] Attempting to move {retry_distance:.2f} inches back toward start")
+
         moved = 0
-        step_size = 0.5
-        while moved < total_distance:
+        while moved < retry_distance:
             if is_obstacle():
                 print("[BLOCKED] Obstacle detected on return path!")
 
@@ -370,19 +389,19 @@ def return_to_start(total_distance, max_corrections=3, error_threshold=6):
                 reroute()
                 break  # Exit return loop for this attempt
 
-            send_command(f"MOVE:{step_size}")
+            send_command(f"MOVE:{retry_step_size}")
             wait_for_done()
-            moved += step_size
-            field.moveForwards(step_size)
+            moved += retry_step_size
+            field.moveForwards(retry_step_size)
 
-        # Check final position
+        # Re-evaluate position
         final_pos = robot.getCurrentLocation()
         dx = final_pos.x - start_pos.x
         dy = final_pos.y - start_pos.y
         error = (dx**2 + dy**2)**0.5
 
-        print(f"[RETURN] Final position: {final_pos}")
-        print(f"[RETURN] Start position: {start_pos}")
+        print(f"[RETURN] Final position: ({final_pos.x:.2f}, {final_pos.y:.2f})")
+        print(f"[RETURN] Start position: ({start_pos.x:.2f}, {start_pos.y:.2f})")
         print(f"[RETURN] Distance error: {error:.2f} inches")
 
         if error <= error_threshold:
@@ -390,11 +409,11 @@ def return_to_start(total_distance, max_corrections=3, error_threshold=6):
             break
         else:
             print(f"[RETRY] Drift too large ({error:.2f}\"), retrying reposition...")
-            total_distance = error  # try to close the gap
             correction_attempts += 1
 
     if correction_attempts > max_corrections:
         print("[RETURN] Max corrections reached. Accepting best effort 🤖")
+
 
 # === Main Execution ===
 if __name__ == "__main__":
