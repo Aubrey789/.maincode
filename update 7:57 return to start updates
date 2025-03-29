@@ -78,6 +78,37 @@ def init_tof_sensors():
             print(f"[ERROR] Sensor {i+1}: {e}")
             tof_sensors.append(None)
 
+def thermal_acquire_target(scan_step=20, max_rotation=360, threshold=40):
+    print("[SEEK] Beginning 360° fire scan...")
+
+    hottest_temp = -999
+    best_angle = 0
+    total_rotated = 0
+
+    while total_rotated < max_rotation:
+        frame = [0] * 768
+        mlx.getFrame(frame)
+        current_max = max(frame)
+        print(f"[SCAN] Rotated {total_rotated}° → Max Temp: {current_max:.2f}°C")
+
+        if current_max > hottest_temp:
+            hottest_temp = current_max
+            best_angle = total_rotated
+
+        if current_max >= threshold:
+            print(f"[LOCK] Fire target found at {total_rotated}° → {current_max:.2f}°C")
+            return total_rotated  # Early exit
+
+        send_command(f"ROTATE:{scan_step}")
+        wait_for_done()
+        total_rotated += scan_step
+
+    print(f"[SEEK] No fire ≥ {threshold}°C found.")
+    print(f"[SEEK] Returning to hottest angle: {best_angle}° @ {hottest_temp:.2f}°C")
+    return best_angle
+
+
+
 def get_tof_distances():
     distances = {}
     for i, sensor in enumerate(tof_sensors):
@@ -265,7 +296,13 @@ def navigate_to_fire(initial_angle):
     fire_found = False
     fire_confirmed = False
 
-    while True:
+   while True:
+    # Do 360° fire seek if no confirmed fire yet
+    if not fire_found:
+        seek_angle = thermal_acquire_target()
+        send_command(f"ROTATE:{seek_angle}")
+        wait_for_done()
+    else:
         rotate_toward_hottest_pixel()
 
         moved = safe_move_forward(2.0)
