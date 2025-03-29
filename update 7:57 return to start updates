@@ -440,17 +440,97 @@ def return_to_start(total_distance, max_corrections=3, error_threshold=6):
     if correction_attempts > max_corrections:
         print("[RETURN] Max corrections reached. Accepting best effort 🤖")
 
+def ohshit():
+    print("[RECOVERY] Monitoring for sensor lock-up...")
 
-# === Main Execution ===
+    same_count = 0
+    last_readings = []
+
+    while True:
+        time.sleep(0.1)
+        distances = get_tof_distances()
+        values = list(distances.values())
+
+        # Count how many sensors have the same reading
+        counts = {}
+        for val in values:
+            if val > 0:  # ignore disconnected / zero values
+                counts[val] = counts.get(val, 0) + 1
+
+        most_common_val = max(counts.values()) if counts else 0
+
+        if most_common_val >= 7:
+            same_count += 1
+            print(f"[LOCK] Detected {most_common_val} sensors with same value ({same_count}/15)")
+        else:
+            same_count = 0  # reset if inconsistency resumes
+
+        if same_count >= 15:
+            print("[OHSHIT] Robot stuck. Forcing forward move and rescan...")
+            send_command("MOVE:2")
+            wait_for_done()
+            field.moveForwards(2)  # if using simulation tracking
+            return  # exit to let main code restart scan
+
+def wall_to_wall_mission():
+    global current_heading
+
+    print("[MISSION] Wall-to-wall mission starting...")
+
+    # === LEG 1 ===
+    send_command("MOVE:0")  # continuous forward
+    while not is_obstacle():
+        time.sleep(0.1)
+    send_command("STOP")
+    wait_for_done()
+
+    print("[TURN] Turning left 90°")
+    send_command("ROTATE:-90")
+    wait_for_done()
+    current_heading = (current_heading - 90) % 360
+
+    # === LEG 2 ===
+    send_command("MOVE:0")
+    while not is_obstacle():
+        time.sleep(0.1)
+    send_command("STOP")
+    wait_for_done()
+
+    print("[TURN] Rotating 180° to return")
+    send_command("ROTATE:180")
+    wait_for_done()
+    current_heading = (current_heading + 180) % 360
+
+    # === RETURN LEG 1 ===
+    send_command("MOVE:0")
+    while not is_obstacle():
+        time.sleep(0.1)
+    send_command("STOP")
+    wait_for_done()
+
+    print("[TURN] Turning right 90°")
+    send_command("ROTATE:90")
+    wait_for_done()
+    current_heading = (current_heading + 90) % 360
+
+    # === RETURN LEG 2 ===
+    send_command("MOVE:0")
+    while not is_obstacle():
+        time.sleep(0.1)
+    send_command("STOP")
+    wait_for_done()
+
+    print("[MISSION COMPLETE] Back to start position.")
+
+
 if __name__ == "__main__":
     try:
         while True:
             wait_for_switch()
-            target_angle = perform_thermal_scan()
-            distance = navigate_to_fire(target_angle)
-            return_to_start(distance)
+            wall_to_wall_mission()
             print("[DONE] Mission complete. Waiting for switch reset...")
             while GPIO.input(SWITCH_PIN) == 0:
                 time.sleep(0.1)
     except KeyboardInterrupt:
         GPIO.cleanup()
+
