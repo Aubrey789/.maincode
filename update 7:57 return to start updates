@@ -340,8 +340,8 @@ def return_to_start(total_distance, max_corrections=3, error_threshold=6):
 
         # Check final position
         final_pos = robot.getCurrentLocation()
-        dx = final_pos[0] - start_pos[0]
-        dy = final_pos[1] - start_pos[1]
+        dx = final_pos.x - start_pos.x
+        dy = final_pos.y - start_pos.y
         error = (dx**2 + dy**2)**0.5
 
         print(f"[RETURN] Final position: {final_pos}")
