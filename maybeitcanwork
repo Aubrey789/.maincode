@@ -1,0 +1,553 @@
+#=== main_mission.py (Raspberry Pi Code) ===
+import serial
+import time
+import RPi.GPIO as GPIO
+from thermal_camera import mlx  # MLX90640 setup
+from vl53l0x_multi import VL53L0X
+from field_simulation import CompetitionField
+import board
+import busio
+import digitalio
+import adafruit_vl53l0x
+import numpy as np
+import math
+
+# === SENSOR LAYOUT (Index → Physical Position) ===
+#  0 → Front Left
+#  1 → Front Middle-Left
+#  2 → Front Middle-Right
+#  3 → Front Right
+#  4 → Back Left
+#  5 → Back Middle-Left
+#  6 → Back Middle-Right
+#  7 → Back Right
+#  8 → Front Ultra-Left (replaces ultrasonic left)
+#  9 → Front Ultra-Right (replaces ultrasonic right)
+
+# Config
+SWITCH_PIN = 26
+SCAN_DIRECTION = "RIGHT"  # or "LEFT"
+SCAN_ANGLE = 90
+SCAN_STEP = 20
+BACKUP_INCHES = 2
+current_heading = 0
+
+# Sensor I2C addresses
+SENSOR_ADDRESSES = [
+    0x30, 0x31, 0x32, 0x34,  # Front 4
+    0x35, 0x36, 0x37, 0x38,  # Back 4
+    0x39, 0x40
+]
+
+# GPIO pins using board constants
+XSHUT_PINS = [
+    board.D17, board.D27, board.D22, board.D23,
+    board.D24, board.D25, board.D5, board.D6,
+    board.D20, board.D21
+]
+
+# Global list to store initialized sensors
+tof_sensors = []
+
+def init_tof_sensors():
+    global tof_sensors
+    i2c = busio.I2C(board.SCL, board.SDA)
+
+    # Power down all sensors
+    xshuts = []
+    for pin in XSHUT_PINS:
+        x = digitalio.DigitalInOut(pin)
+        x.direction = digitalio.Direction.OUTPUT
+        x.value = False
+        xshuts.append(x)
+    time.sleep(0.5)
+
+    # Power up sensors one by one and assign unique addresses
+    tof_sensors = []
+    for i in range(len(XSHUT_PINS)):
+        print(f"[INIT] Powering Sensor {i+1}")
+        xshuts[i].value = True
+        time.sleep(0.1)
+        try:
+            sensor = adafruit_vl53l0x.VL53L0X(i2c)
+            sensor.set_address(SENSOR_ADDRESSES[i])
+            time.sleep(0.05)
+            sensor = adafruit_vl53l0x.VL53L0X(i2c, address=SENSOR_ADDRESSES[i])
+            tof_sensors.append(sensor)
+            print(f"[SUCCESS] Sensor {i+1} at 0x{SENSOR_ADDRESSES[i]:X}")
+        except Exception as e:
+            print(f"[ERROR] Sensor {i+1}: {e}")
+            tof_sensors.append(None)
+
+def thermal_acquire_target(scan_step=30, max_rotation=360, threshold=40):
+    print("[SEEK] Performing 360° fire scan (every 60°)...")
+
+    hottest_temp = -999
+    best_angle = 0
+    total_rotated = 0
+
+    while total_rotated < max_rotation:
+        frame = [0] * 768
+        mlx.getFrame(frame)
+        current_max = max(frame)
+        print(f"[SCAN] Rotated {total_rotated}° → Max Temp: {current_max:.2f}°C")
+
+        if current_max > hottest_temp:
+            hottest_temp = current_max
+            best_angle = total_rotated
+
+        if current_max >= threshold:
+            print(f"[LOCK] Fire target found at {total_rotated}° → {current_max:.2f}°C")
+            return total_rotated
+
+        send_command(f"ROTATE:{scan_step}")
+        wait_for_done()
+        total_rotated += scan_step
+
+    print(f"[SEEK] No fire ≥ {threshold}°C found.")
+    print(f"[SEEK] Returning to hottest angle: {best_angle}° @ {hottest_temp:.2f}°C")
+    return best_angle
+
+
+
+def get_tof_distances():
+    distances = {}
+    for i, sensor in enumerate(tof_sensors):
+        try:
+            distances[i] = sensor.range if sensor else 0
+        except Exception as e:
+            print(f"[ToF ERROR] Sensor {i}: {e}")
+            distances[i] = 0
+    return distances
+
+# Init GPIO
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(SWITCH_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+
+# Init Serial to Arduino
+arduino = serial.Serial("/dev/ttyACM0", 115200, timeout=1)
+time.sleep(2)
+arduino.reset_input_buffer()
+
+# Init Sensors
+init_tof_sensors()
+
+# Init Simulation
+field = CompetitionField()
+robot = field.getMyRobot()
+start_pos = robot.getCurrentLocation()
+
+# === Helper Functions ===
+def wait_for_switch():
+    print("[WAITING] Flip the switch to start...")
+    while GPIO.input(SWITCH_PIN):
+        time.sleep(0.1)
+    print("[START] Switch ON. Beginning mission.")
+def send_command(cmd):
+    print(f"[COMMAND] → Arduino: {cmd}")
+    arduino.write((cmd + "\n").encode())
+
+def wait_for_done():
+    global current_heading
+    while True:
+        if arduino.in_waiting:
+            msg = arduino.readline().decode().strip()
+            print(f"[ARDUINO] {msg}")
+            if msg.startswith("ROTATE:"):
+                angle = float(msg.split(":")[1])
+                current_heading = (current_heading + angle) % 360
+            if msg == "DONE":
+                break
+
+
+def is_back_clear(threshold_mm=55):
+    """Check if any rear sensors (4–7) detect an object too close."""
+    tof = get_tof_distances()
+    back_indices = [4, 5, 6, 7]
+    distances = [tof.get(i, 0) for i in back_indices if tof.get(i, 0) > 0]
+    print(f"[BACK] Distances: {distances}")
+    return all(d > threshold_mm for d in distances)
+
+def perform_thermal_scan():
+    print("[SCAN] Starting initial 80° thermal sweep...")
+    max_temp = -999
+    best_angle = 0
+    current_angle = 0
+
+    for step in [20, 20, 20, 20]:  # Total: 80°
+        angle = step if SCAN_DIRECTION == "RIGHT" else -step
+        current_angle += angle
+        send_command(f"ROTATE:{angle}")
+        wait_for_done()
+        time.sleep(0.5)
+
+        frame = [0] * 768
+        mlx.getFrame(frame)
+        current_max = max(frame)
+        print(f"[SCAN] Angle {current_angle}° → Max Temp: {current_max:.2f}°C")
+
+        if current_max > max_temp:
+            max_temp = current_max
+            best_angle = current_angle
+
+    print(f"[LOCKED] Hottest angle: {best_angle}° @ {max_temp:.2f}°C")
+    return best_angle
+
+def is_obstacle():
+    tof = get_tof_distances()
+    front_indices = [1, 2, 8, 9]  # All 6 front ToF sensors
+    front_blocked = any(
+        tof[i] < 200 for i in front_indices if tof.get(i, 0) > 0
+    )
+    return front_blocked
+
+def is_obstacle2():
+    tof = get_tof_distances()
+    front_indices = [1, 2, 8, 9]  # All 6 front ToF sensors
+    front_blocked = any(
+        tof[i] < 457 for i in front_indices if tof.get(i, 0) > 0
+    )
+    return front_blocked
+
+def reroute():
+    print("[AVOID] Assessing best turn direction...")
+
+    tof = get_tof_distances()
+    left_indices = [1, 8]
+    right_indices = [2, 9]
+
+    left_distances = [tof.get(i, 0) for i in left_indices if tof.get(i, 0) > 0]
+    right_distances = [tof.get(i, 0) for i in right_indices if tof.get(i, 0) > 0]
+
+    left_min = min(left_distances) if left_distances else float('inf')
+    right_min = min(right_distances) if right_distances else float('inf')
+
+    # Decide pivot direction
+    if left_min > right_min:
+        preferred_angles = [-45, -30, -60]  # Prefer left pivots
+        print("[AVOID] Left side is clearer")
+    else:
+        preferred_angles = [45, 30, 60]     # Prefer right pivots
+        print("[AVOID] Right side is clearer")
+
+    for angle in preferred_angles:
+        send_command(f"ROTATE:{angle}")
+        wait_for_done()
+        if not is_obstacle():
+            print(f"[AVOID] Cleared path after turning {angle}°")
+            return True
+
+    # If turning didn't work, back up and rotate hard
+    print("[AVOID] Pivoting failed — backing up")
+    print("[AVOID] Checking rear before backing up")
+    if is_back_clear():
+        send_command(f"MOVE:-{BACKUP_INCHES}")
+        wait_for_done()
+    else:
+        print("[BACK] Too close! Skipping backup.")
+
+    send_command("ROTATE:-90")
+    wait_for_done()
+    return True
+
+def get_hottest_pixel_info(frame):
+    grid = np.array(frame).reshape(24, 32)
+    max_temp = np.max(grid)
+    max_idx = np.unravel_index(np.argmax(grid), grid.shape)
+    row, col = max_idx
+    return max_temp, row, col
+
+def rotate_toward_hottest_pixel():
+    frame = [0] * 768
+    mlx.getFrame(frame)
+    _, _, col = get_hottest_pixel_info(frame)
+    center_col = 16
+    offset = col - center_col
+    degrees_per_col = 55 / 32
+    angle = offset * degrees_per_col
+    print(f"[CENTER] Pixel offset {offset} → rotate {angle:.2f}°")
+    send_command(f"ROTATE:{angle}")
+    wait_for_done()
+
+def safe_move_forward(total_inches, step_size=0.5):
+    moved = 0
+    while moved < total_inches:
+        if is_obstacle():
+            print("[BLOCKED] Obstacle detected mid-move!")
+
+            # Back up
+            print("[AVOID] Backing up... checking rear sensors")
+            if is_back_clear():
+                send_command("MOVE:-2")
+                wait_for_done()
+                field.moveForwards(-2)
+            else:
+                print("[BACK] Obstacle too close! Cancelling backup.")
+
+
+            # Try reroute
+            reroute()
+            return moved  # return how far we made it before rerouting
+
+        send_command(f"MOVE:{step_size}")
+        wait_for_done()
+        moved += step_size
+        field.moveForwards(step_size)
+    return moved
+
+def navigate_to_fire(initial_angle):
+    send_command(f"ROTATE:{initial_angle}")
+    wait_for_done()
+
+    total_distance = 0
+    fire_found = False
+    fire_confirmed = False
+
+    while True:
+        # 🔥 First: scan to acquire fire heading
+        if not fire_found:
+            seek_angle = thermal_acquire_target()
+            send_command(f"ROTATE:{seek_angle}")
+            wait_for_done()
+        else:
+            rotate_toward_hottest_pixel()
+
+        # 🚶 Then move forward and accumulate distance
+        moved = safe_move_forward(4.0)
+        total_distance += moved
+
+        # 📸 Scan thermal frame during movement window
+        previous_temp = -999
+        scan_interval = 3.0  # start with 3s interval
+        last_scan_time = time.time()
+
+        scan_start_time = time.time()
+        while time.time() - scan_start_time < scan_interval:
+            frame = [0] * 768
+            mlx.getFrame(frame)
+            max_temp, _, _ = get_hottest_pixel_info(frame)
+            print(f"[THERMAL] Max Temp: {max_temp:.2f}°C")
+
+            # 🔥 Check if heat is rising
+            if max_temp > previous_temp + 1:  # Significant increase
+                print("[TRACKING] Temperature rising — scanning faster 🔍")
+                scan_interval = 1.5
+            elif max_temp < previous_temp - 1:
+                print("[TRACKING] Temperature dropped — slowing scan 🔄")
+                scan_interval = 3.0
+
+            previous_temp = max_temp
+            time.sleep(0.2)  # slight pause between readings
+
+        if max_temp >= 100:
+            print("[ARRIVED] Fire reached!")
+
+            # 🔙 Step back 2 inches
+            print("[SAFETY] Backing up from heat source...")
+            send_command("MOVE:-2")
+            wait_for_done()
+            field.moveForwards(-2)  # update sim position
+
+            # 🔄 Turn around 180°
+            print("[ROTATE] Turning 180° to begin return")
+            send_command("ROTATE:180")
+            wait_for_done()
+
+            fire_confirmed = True
+            break
+
+            if max_temp >= 40:
+                fire_found = True
+
+            time.sleep(0.2)
+
+        if fire_confirmed:
+            break
+
+        if not fire_found:
+            print("[SCAN] No fire yet. Continuing pursuit...")
+
+        if is_obstacle():
+            reroute()
+
+    return total_distance
+
+
+def angle_to_target(from_pos, to_pos):
+    dx = to_pos.x - from_pos.x
+    dy = to_pos.y - from_pos.y
+    angle_rad = math.atan2(dy, dx)
+    angle_deg = math.degrees(angle_rad)
+    return angle_deg % 360
+
+def return_to_start(total_distance, max_corrections=3, error_threshold=6):
+    global current_heading
+    print(f"[RETURN] Heading back to start. Distance: {total_distance:.2f} in")
+
+    correction_attempts = 0
+    retry_step_size = 0.5
+
+    while correction_attempts <= max_corrections:
+        final_pos = robot.getCurrentLocation()
+        dx = final_pos.x - start_pos.x
+        dy = final_pos.y - start_pos.y
+        error = (dx**2 + dy**2)**0.5
+
+        # Compute angle from current location to starting point
+        angle_home = angle_to_target(final_pos, start_pos)
+        angle_to_rotate = (angle_home - current_heading) % 360
+        if angle_to_rotate > 180:
+            angle_to_rotate -= 360
+
+        print(f"[REORIENT] Rotating {angle_to_rotate:.2f}° to face start")
+        send_command(f"ROTATE:{angle_to_rotate}")
+        wait_for_done()
+        current_heading = angle_home  # Update heading to true
+
+        # Limit retry travel to avoid overshoot
+        retry_distance = min(error, 10)
+        print(f"[RETURN] Attempting to move {retry_distance:.2f} inches back toward start")
+
+        moved = 0
+        while moved < retry_distance:
+            if is_obstacle():
+                print("[BLOCKED] Obstacle detected on return path!")
+
+                if is_back_clear():
+                    send_command("MOVE:-2")
+                    wait_for_done()
+                    field.moveForwards(-2)
+                else:
+                    print("[BACK] Too close! Skipping backup.")
+
+                reroute()
+                break  # Exit return loop for this attempt
+
+            send_command(f"MOVE:{retry_step_size}")
+            wait_for_done()
+            moved += retry_step_size
+            field.moveForwards(retry_step_size)
+
+        # Re-evaluate position
+        final_pos = robot.getCurrentLocation()
+        dx = final_pos.x - start_pos.x
+        dy = final_pos.y - start_pos.y
+        error = (dx**2 + dy**2)**0.5
+
+        print(f"[RETURN] Final position: ({final_pos.x:.2f}, {final_pos.y:.2f})")
+        print(f"[RETURN] Start position: ({start_pos.x:.2f}, {start_pos.y:.2f})")
+        print(f"[RETURN] Distance error: {error:.2f} inches")
+
+        if error <= error_threshold:
+            print("[RETURN] Within acceptable range ✅")
+            break
+        else:
+            print(f"[RETRY] Drift too large ({error:.2f}\"), retrying reposition...")
+            correction_attempts += 1
+
+    if correction_attempts > max_corrections:
+        print("[RETURN] Max corrections reached. Accepting best effort 🤖")
+
+def ohshit(max_stuck_time=4, max_sensor_repeats=15):
+    print("[RECOVERY] Monitoring for sensor lock-up or no movement...")
+
+    same_count = 0
+    freeze_timer_start = time.time()
+    previous_position = robot.getCurrentLocation()
+
+    while True:
+        time.sleep(0.1)
+
+        # === Sensor freeze detection ===
+        distances = get_tof_distances()
+        values = list(distances.values())
+        counts = {}
+        for val in values:
+            if val > 0:
+                counts[val] = counts.get(val, 0) + 1
+        most_common_val = max(counts.values()) if counts else 0
+        if most_common_val >= 7:
+            same_count += 1
+            print(f"[LOCK] {most_common_val} sensors stuck ({same_count}/{max_sensor_repeats})")
+        else:
+            same_count = 0
+
+        # === No movement detection ===
+        current_position = robot.getCurrentLocation()
+        dx = current_position.x - previous_position.x
+        dy = current_position.y - previous_position.y
+        distance_moved = (dx**2 + dy**2)**0.5
+
+        if distance_moved > 0.25:  # if it moved > 0.25 inches
+            freeze_timer_start = time.time()
+            previous_position = current_position
+
+        if same_count >= max_sensor_repeats or (time.time() - freeze_timer_start) > max_stuck_time:
+            print("[OHSHIT] Robot stuck — sensors frozen or no movement")
+            send_command("MOVE:2")
+            wait_for_done()
+            field.moveForwards(2)
+            return
+
+
+def wall_to_wall_mission():
+    global current_heading
+
+    print("[MISSION] Wall-to-wall mission starting...")
+
+    # === LEG 1 ===
+    send_command("MOVE:0")  # continuous forward
+    while not is_obstacle():
+         time.sleep(0.1)
+    send_command("STOP")
+    wait_for_done()
+
+    print("[TURN] Turning left 90°")
+    send_command("ROTATE:-90")
+    wait_for_done()
+    current_heading = (current_heading - 90) % 360
+
+    # === LEG 2 ===
+    send_command("MOVE:0")
+    while not is_obstacle2():
+         time.sleep(0.1)
+    send_command("STOP")
+    wait_for_done()
+
+    print("[TURN] Rotating 180° to return")
+    send_command("ROTATE:-185")
+    wait_for_done()
+    current_heading = (current_heading + 180) % 360
+
+    # === RETURN LEG 1 ===
+    send_command("MOVE:0")
+    while not is_obstacle():
+          time.sleep(0.1)
+    send_command("STOP")
+    wait_for_done()
+
+    print("[TURN] Turning right 90°")
+    send_command("ROTATE:100")
+    wait_for_done()
+    current_heading = (current_heading + 90) % 360
+
+    # === RETURN LEG 2 ===
+    send_command("MOVE:0")
+    while not is_obstacle():
+         time.sleep(0.1)
+    send_command("STOP")
+    wait_for_done()
+
+    print("[MISSION COMPLETE] Back to start position.")
+
+
+if __name__ == "__main__":
+    try:
+        while True:
+            wait_for_switch()
+            wall_to_wall_mission()
+            print("[DONE] Mission complete. Waiting for switch reset...")
+            while GPIO.input(SWITCH_PIN) == 0:
+                time.sleep(0.1)
+    except KeyboardInterrupt:
+        GPIO.cleanup()
