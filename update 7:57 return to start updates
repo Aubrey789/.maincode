@@ -329,8 +329,6 @@ def navigate_to_fire(initial_angle):
             print("[ROTATE] Turning 180° to begin return")
             send_command("ROTATE:180")
             wait_for_done()
-            global current_heading
-            current_heading = (current_heading + 180) % 360
 
             fire_confirmed = True
             break
