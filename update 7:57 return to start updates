@@ -148,7 +148,6 @@ def send_command(cmd):
     arduino.write((cmd + "\n").encode())
 
 def wait_for_done():
-    def wait_for_done():
     global current_heading
     while True:
         if arduino.in_waiting:
