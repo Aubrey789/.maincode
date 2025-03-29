@@ -79,7 +79,7 @@ def init_tof_sensors():
             print(f"[ERROR] Sensor {i+1}: {e}")
             tof_sensors.append(None)
 
-def thermal_acquire_target(scan_step=60, max_rotation=360, threshold=40):
+def thermal_acquire_target(scan_step=30, max_rotation=360, threshold=40):
     print("[SEEK] Performing 360° fire scan (every 60°)...")
 
     hottest_temp = -999
@@ -305,25 +305,40 @@ def navigate_to_fire(initial_angle):
             rotate_toward_hottest_pixel()
 
         # 🚶 Then move forward and accumulate distance
-        moved = safe_move_forward(2.0)
+        moved = safe_move_forward(4.0)
         total_distance += moved
 
         # 📸 Scan thermal frame during movement window
-        start_time = time.time()
-        while time.time() - start_time < 3.0:
+        previous_temp = -999
+        scan_interval = 3.0  # start with 3s interval
+        last_scan_time = time.time()
+
+        scan_start_time = time.time()
+        while time.time() - scan_start_time < scan_interval:
             frame = [0] * 768
             mlx.getFrame(frame)
             max_temp, _, _ = get_hottest_pixel_info(frame)
             print(f"[THERMAL] Max Temp: {max_temp:.2f}°C")
+        
+            # 🔥 Check if heat is rising
+            if max_temp > previous_temp + 1:  # Significant increase
+                print("[TRACKING] Temperature rising — scanning faster 🔍")
+                scan_interval = 1.5
+            elif max_temp < previous_temp - 1:
+                print("[TRACKING] Temperature dropped — slowing scan 🔄")
+                scan_interval = 3.0
+        
+            previous_temp = max_temp
+            time.sleep(0.2)  # slight pause between readings
 
         if max_temp >= 68:
             print("[ARRIVED] Fire reached!")
 
             # 🔙 Step back 4 inches
             print("[SAFETY] Backing up from heat source...")
-            send_command("MOVE:-4")
+            send_command("MOVE:-2")
             wait_for_done()
-            field.moveForwards(-4)  # update sim position
+            field.moveForwards(-2)  # update sim position
 
             # 🔄 Turn around 180°
             print("[ROTATE] Turning 180° to begin return")
