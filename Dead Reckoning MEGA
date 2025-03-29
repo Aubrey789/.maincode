@@ -118,17 +118,20 @@ void checkSerialCommands() {
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
 
+    Serial.print("[RCVD] "); Serial.println(cmd);  // Optional debug print
+
     if (cmd == "GET_POS") {
       float heading_deg = heading_rad * 180.0 / PI;
       Serial.print("POS:");
       Serial.print(x_pos, 2); Serial.print(",");
       Serial.print(y_pos, 2); Serial.print(",");
       Serial.println(heading_deg, 2);
+    } else {
+      processCommand(cmd);  // ✅ This line was missing!
     }
-
-    // handle other commands...
   }
 }
+
 
 void processCommand(String cmd) {
   if (cmd.startsWith("MOVE:")) {
