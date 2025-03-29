@@ -28,7 +28,7 @@ SWITCH_PIN = 26
 SCAN_DIRECTION = "RIGHT"  # or "LEFT"
 SCAN_ANGLE = 90
 SCAN_STEP = 20
-BACKUP_INCHES = 4
+BACKUP_INCHES = 2
 
 # Sensor I2C addresses
 SENSOR_ADDRESSES = [
@@ -122,13 +122,23 @@ def wait_for_done():
             if msg == "DONE":
                 break
 
+def is_back_clear(threshold_mm=75):
+    """Check if any rear sensors (4–7) detect an object too close."""
+    tof = get_tof_distances()
+    back_indices = [4, 5, 6, 7]
+    distances = [tof.get(i, 0) for i in back_indices if tof.get(i, 0) > 0]
+    print(f"[BACK] Distances: {distances}")
+    return all(d > threshold_mm for d in distances)
+
 def perform_thermal_scan():
     print("[SCAN] Starting thermal sweep...")
     max_temp = -999
     best_angle = 0
+    current_angle = 0
 
-    for i in range(0, SCAN_ANGLE + 1, SCAN_STEP):
-        angle = i if SCAN_DIRECTION == "RIGHT" else -i
+    for step in [20, 20, 20, 20]:  # 4 steps: 20°, 40°, 60°, 80° total
+        angle = step if SCAN_DIRECTION == "RIGHT" else -step
+        current_angle += angle
         send_command(f"ROTATE:{angle}")
         wait_for_done()
         time.sleep(0.5)
@@ -136,14 +146,15 @@ def perform_thermal_scan():
         frame = [0] * 768
         mlx.getFrame(frame)
         current_max = max(frame)
-        print(f"[SCAN] Angle {angle}° → Max Temp: {current_max:.2f}°C")
+        print(f"[SCAN] Angle {current_angle}° → Max Temp: {current_max:.2f}°C")
 
         if current_max > max_temp:
             max_temp = current_max
-            best_angle = angle
+            best_angle = current_angle
 
     print(f"[LOCKED] Hottest angle: {best_angle}° @ {max_temp:.2f}°C")
     return best_angle
+
 
 def is_obstacle():
     tof = get_tof_distances()
@@ -183,8 +194,13 @@ def reroute():
 
     # If turning didn't work, back up and rotate hard
     print("[AVOID] Pivoting failed — backing up")
-    send_command(f"MOVE:-{BACKUP_INCHES}")
-    wait_for_done()
+    print("[AVOID] Checking rear before backing up")
+    if is_back_clear():
+        send_command(f"MOVE:-{BACKUP_INCHES}")
+        wait_for_done()
+    else:
+        print("[BACK] Too close! Skipping backup.")
+
     send_command("ROTATE:-90")
     wait_for_done()
     return True
@@ -215,10 +231,14 @@ def safe_move_forward(total_inches, step_size=0.5):
             print("[BLOCKED] Obstacle detected mid-move!")
 
             # Back up
-            print("[AVOID] Backing up...")
-            send_command("MOVE:-2")
-            wait_for_done()
-            field.moveForwards(-2)
+            print("[AVOID] Backing up... checking rear sensors")
+            if is_back_clear():
+                send_command("MOVE:-2")
+                wait_for_done()
+                field.moveForwards(-2)
+            else:
+                print("[BACK] Obstacle too close! Cancelling backup.")
+
 
             # Try reroute
             reroute()
