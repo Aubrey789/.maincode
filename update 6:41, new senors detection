@@ -29,6 +29,7 @@ SCAN_DIRECTION = "RIGHT"  # or "LEFT"
 SCAN_ANGLE = 90
 SCAN_STEP = 20
 BACKUP_INCHES = 2
+current_heading = 0
 
 # Sensor I2C addresses
 SENSOR_ADDRESSES = [
@@ -115,10 +116,14 @@ def send_command(cmd):
     arduino.write((cmd + "\n").encode())
 
 def wait_for_done():
+    global current_heading
     while True:
         if arduino.in_waiting:
             msg = arduino.readline().decode().strip()
             print(f"[ARDUINO] {msg}")
+            if msg.startswith("ROTATE:");
+            angle = float(msg.split(":")[1])
+                current_heading = (current_heading + angle) % 360
             if msg == "DONE":
                 break
 
@@ -293,14 +298,64 @@ def navigate_to_fire(initial_angle):
 
     return total_distance
 
-def return_to_start(total_distance):
-    print(f"[RETURN] Heading back {total_distance} in")
-    send_command("ROTATE:180")
-    wait_for_done()
-    steps = total_distance // 6
-    for _ in range(int(steps)):
-        send_command("MOVE:6")
+def return_to_start(total_distance, max_corrections=3, error_threshold=6):
+    global current_heading
+    print(f"[RETURN] Heading back to start. Distance: {total_distance:.2f} in")
+
+    correction_attempts = 0
+
+    while correction_attempts <= max_corrections:
+        # Rotate toward starting direction
+        return_angle = (180 - current_heading) % 360
+        if return_angle > 180:
+            return_angle -= 360
+
+        print(f"[RETURN] Rotating {return_angle:.2f}° to face start")
+        send_command(f"ROTATE:{return_angle}")
         wait_for_done()
+
+        # Begin safe return movement
+        moved = 0
+        step_size = 0.5
+        while moved < total_distance:
+            if is_obstacle():
+                print("[BLOCKED] Obstacle detected on return path!")
+
+                if is_back_clear():
+                    send_command("MOVE:-2")
+                    wait_for_done()
+                    field.moveForwards(-2)
+                else:
+                    print("[BACK] Too close! Skipping backup.")
+
+                reroute()
+                break  # Exit return loop for this attempt
+
+            send_command(f"MOVE:{step_size}")
+            wait_for_done()
+            moved += step_size
+            field.moveForwards(step_size)
+
+        # Check final position
+        final_pos = robot.getCurrentLocation()
+        dx = final_pos[0] - start_pos[0]
+        dy = final_pos[1] - start_pos[1]
+        error = (dx**2 + dy**2)**0.5
+
+        print(f"[RETURN] Final position: {final_pos}")
+        print(f"[RETURN] Start position: {start_pos}")
+        print(f"[RETURN] Distance error: {error:.2f} inches")
+
+        if error <= error_threshold:
+            print("[RETURN] Within acceptable range ✅")
+            break
+        else:
+            print(f"[RETRY] Drift too large ({error:.2f}\"), retrying reposition...")
+            total_distance = error  # try to close the gap
+            correction_attempts += 1
+
+    if correction_attempts > max_corrections:
+        print("[RETURN] Max corrections reached. Accepting best effort 🤖")
 
 # === Main Execution ===
 if __name__ == "__main__":
