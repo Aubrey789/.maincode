@@ -160,7 +160,7 @@ def wait_for_done():
                 break
 
 
-def is_back_clear(threshold_mm=75):
+def is_back_clear(threshold_mm=55):
     """Check if any rear sensors (4–7) detect an object too close."""
     tof = get_tof_distances()
     back_indices = [4, 5, 6, 7]
@@ -331,10 +331,10 @@ def navigate_to_fire(initial_angle):
             previous_temp = max_temp
             time.sleep(0.2)  # slight pause between readings
 
-        if max_temp >= 68:
+        if max_temp >= 100:
             print("[ARRIVED] Fire reached!")
 
-            # 🔙 Step back 4 inches
+            # 🔙 Step back 2 inches
             print("[SAFETY] Backing up from heat source...")
             send_command("MOVE:-2")
             wait_for_done()
