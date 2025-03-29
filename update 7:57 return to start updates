@@ -116,16 +116,18 @@ def send_command(cmd):
     arduino.write((cmd + "\n").encode())
 
 def wait_for_done():
+    def wait_for_done():
     global current_heading
     while True:
         if arduino.in_waiting:
             msg = arduino.readline().decode().strip()
             print(f"[ARDUINO] {msg}")
-            if msg.startswith("ROTATE:");
-            angle = float(msg.split(":")[1])
+            if msg.startswith("ROTATE:"):
+                angle = float(msg.split(":")[1])
                 current_heading = (current_heading + angle) % 360
             if msg == "DONE":
                 break
+
 
 def is_back_clear(threshold_mm=75):
     """Check if any rear sensors (4–7) detect an object too close."""
