@@ -33,13 +33,15 @@ BACKUP_INCHES = 4
 # Sensor I2C addresses
 SENSOR_ADDRESSES = [
     0x30, 0x31, 0x32, 0x34,  # Front 4
-    0x35, 0x36, 0x37, 0x38  # Back 4
+    0x35, 0x36, 0x37, 0x38,  # Back 4
+    0x39, 0x40
 ]
 
 # GPIO pins using board constants
 XSHUT_PINS = [
     board.D17, board.D27, board.D22, board.D23,
-    board.D24, board.D25, board.D5, board.D6 
+    board.D24, board.D25, board.D5, board.D6,
+    board.D20, board.D21
 ]
 
 # Global list to store initialized sensors
@@ -250,7 +252,7 @@ def navigate_to_fire(initial_angle):
             max_temp, _, _ = get_hottest_pixel_info(frame)
             print(f"[THERMAL] Max Temp: {max_temp:.2f}°C")
 
-            if max_temp >= 85:
+            if max_temp >= 68:
                 print("[ARRIVED] Fire reached!")
                 fire_confirmed = True
                 break
