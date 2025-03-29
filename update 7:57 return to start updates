@@ -317,10 +317,24 @@ def navigate_to_fire(initial_angle):
             max_temp, _, _ = get_hottest_pixel_info(frame)
             print(f"[THERMAL] Max Temp: {max_temp:.2f}°C")
 
-            if max_temp >= 68:
-                print("[ARRIVED] Fire reached!")
-                fire_confirmed = True
-                break
+        if max_temp >= 68:
+            print("[ARRIVED] Fire reached!")
+
+            # 🔙 Step back 4 inches
+            print("[SAFETY] Backing up from heat source...")
+            send_command("MOVE:-4")
+            wait_for_done()
+            field.moveForwards(-4)  # update sim position
+
+            # 🔄 Turn around 180°
+            print("[ROTATE] Turning 180° to begin return")
+            send_command("ROTATE:180")
+            wait_for_done()
+            global current_heading
+            current_heading = (current_heading + 180) % 360
+
+            fire_confirmed = True
+            break
 
             if max_temp >= 40:
                 fire_found = True
