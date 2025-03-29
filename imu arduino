@@ -1,0 +1,164 @@
+#include <Wire.h>
+#include <MPU6050_light.h>
+
+// === IMU SETUP ===
+MPU6050 mpu(Wire);
+unsigned long previousTime = 0;
+float currentHeading = 0;
+
+// === MOTOR + ENCODER DEFINES ===
+// (You already have these; placeholder names shown)
+const int M1IN1 = 3;
+const int M1IN2 = 4;
+const int M1PWM = 5;
+const int M2IN1 = 6;
+const int M2IN2 = 7;
+const int M2PWM = 9;
+
+// Encoder tracking
+volatile long left_encoder_count = 0;
+volatile long right_encoder_count = 0;
+
+// === SETUP ===
+void setup() {
+  Serial.begin(115200);
+
+  // Init IMU
+  Wire.begin();
+  byte status = mpu.begin();
+  Serial.print(F("[MPU] Status: "));
+  Serial.println(status);  // 0 = success
+  delay(1000);
+  mpu.calcOffsets();  // Calibrate gyro
+  Serial.println(F("[MPU] Calibration done"));
+  previousTime = millis();
+
+  // Motor setup (example)
+  pinMode(M1IN1, OUTPUT);
+  pinMode(M1IN2, OUTPUT);
+  pinMode(M1PWM, OUTPUT);
+  pinMode(M2IN1, OUTPUT);
+  pinMode(M2IN2, OUTPUT);
+  pinMode(M2PWM, OUTPUT);
+
+  // Encoder interrupts (assume pins 2 & 3 for example)
+  attachInterrupt(digitalPinToInterrupt(2), leftEncoderISR, RISING);
+  attachInterrupt(digitalPinToInterrupt(3), rightEncoderISR, RISING);
+
+  Serial.println("READY");
+}
+
+// === ENCODER ISRs ===
+void leftEncoderISR() {
+  left_encoder_count++;
+}
+void rightEncoderISR() {
+  right_encoder_count++;
+}
+
+// === IMU HEADING TRACKER ===
+void updateHeading() {
+  mpu.update();
+  unsigned long currentTime = millis();
+  float dt = (currentTime - previousTime) / 1000.0;
+  previousTime = currentTime;
+
+  float gyroZ = mpu.getGyroZ();
+  currentHeading += gyroZ * dt;
+  currentHeading = fmod(currentHeading, 360.0);
+  if (currentHeading < 0) currentHeading += 360;
+}
+
+// === MOVEMENT EXAMPLES ===
+void moveForward(float inches) {
+  // Reset encoders
+  left_encoder_count = 0;
+  right_encoder_count = 0;
+
+  // Example: move forward for X inches (timing-based for now)
+  unsigned long moveTime = inches * 100;  // rough estimate
+  unsigned long start = millis();
+  digitalWrite(M1IN1, HIGH);
+  digitalWrite(M1IN2, LOW);
+  digitalWrite(M2IN1, HIGH);
+  digitalWrite(M2IN2, LOW);
+  analogWrite(M1PWM, 150);
+  analogWrite(M2PWM, 150);
+
+  while (millis() - start < moveTime) {
+    updateHeading();  // Track heading as you move
+  }
+
+  analogWrite(M1PWM, 0);
+  analogWrite(M2PWM, 0);
+
+  sendDone();
+}
+
+void rotateDegrees(float degrees) {
+  // You could use delay or encoder-based turning
+  updateHeading();
+
+  unsigned long rotateTime = abs(degrees) * 10;  // rough guess
+  unsigned long start = millis();
+
+  if (degrees > 0) {
+    digitalWrite(M1IN1, LOW);
+    digitalWrite(M1IN2, HIGH);
+    digitalWrite(M2IN1, HIGH);
+    digitalWrite(M2IN2, LOW);
+  } else {
+    digitalWrite(M1IN1, HIGH);
+    digitalWrite(M1IN2, LOW);
+    digitalWrite(M2IN1, LOW);
+    digitalWrite(M2IN2, HIGH);
+  }
+
+  analogWrite(M1PWM, 150);
+  analogWrite(M2PWM, 150);
+
+  while (millis() - start < rotateTime) {
+    updateHeading();
+  }
+
+  analogWrite(M1PWM, 0);
+  analogWrite(M2PWM, 0);
+
+  sendDone();
+}
+
+// === SERIAL COMMAND HANDLER ===
+void loop() {
+  updateHeading();
+
+  if (Serial.available()) {
+    String command = Serial.readStringUntil('\n');
+    command.trim();
+
+    if (command.startsWith("MOVE:")) {
+      float dist = command.substring(5).toFloat();
+      moveForward(dist);
+    } else if (command.startsWith("ROTATE:")) {
+      float angle = command.substring(7).toFloat();
+      rotateDegrees(angle);
+    } else if (command == "GET_ENCODERS") {
+      Serial.print("ENCODERS:");
+      Serial.print(left_encoder_count);
+      Serial.print(",");
+      Serial.println(right_encoder_count);
+    } else if (command == "STOP") {
+      analogWrite(M1PWM, 0);
+      analogWrite(M2PWM, 0);
+    }
+  }
+}
+
+// === SEND DONE WITH HEADING + ENCODERS ===
+void sendDone() {
+  Serial.print("DONE:");
+  Serial.print(currentHeading, 1);  // degrees, 1 decimal
+  Serial.print(",");
+  Serial.print(left_encoder_count);
+  Serial.print(",");
+  Serial.println(right_encoder_count);
+}
